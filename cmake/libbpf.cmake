@@ -1,7 +1,7 @@
 #
 # Setup libbpf
 #
-set(LIBBPF_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libbpf/)
+set(LIBBPF_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/libbpf/)
 include(ExternalProject)
 ExternalProject_Add(libbpf
   PREFIX libbpf
@@ -9,6 +9,7 @@ ExternalProject_Add(libbpf
   CONFIGURE_COMMAND "mkdir" "-p" "${CMAKE_CURRENT_BINARY_DIR}/libbpf/libbpf"
   BUILD_COMMAND "INCLUDEDIR=" "LIBDIR=" "UAPIDIR=" "OBJDIR=${CMAKE_CURRENT_BINARY_DIR}/libbpf/libbpf" "DESTDIR=${CMAKE_CURRENT_BINARY_DIR}/libbpf" "make" "CFLAGS=-g -O2 -Werror -Wall -std=gnu89 -fPIC -fvisibility=hidden -DSHARED -DCUSTOM_DEFINE=1" "-j" "install"
   BUILD_IN_SOURCE TRUE
+  BUILD_ALWAYS TRUE
   INSTALL_COMMAND ""
   STEP_TARGETS build
   BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/libbpf/libbpf.a
@@ -19,7 +20,6 @@ ExternalProject_Add(libbpf
 set(LIBBPF_INCLUDE_DIRS ${CMAKE_CURRENT_BINARY_DIR}/libbpf/)
 set(LIBBPF_LIBRARIES ${CMAKE_CURRENT_BINARY_DIR}/libbpf/libbpf.a)
 
-set(header_output_list)
 
 function(copy_header SRC_DIR TARGET_DIR)
   file(GLOB_RECURSE FILES RELATIVE "${SRC_DIR}" "${SRC_DIR}/*")
@@ -66,8 +66,12 @@ endforeach()
 
 add_dependencies(copy_headers libbpf)
 
+add_custom_target(libbpf_with_headers)
+
+add_dependencies(libbpf_with_headers libbpf copy_headers)
+
 # # Setup bpftool
-set(BPFTOOL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/bpftool)
+set(BPFTOOL_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/bpftool)
 set(BPFTOOL_INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/bpftool)
 ExternalProject_Add(bpftool
   PREFIX bpftool
@@ -106,7 +110,7 @@ function(add_ebpf_program_target target_name source_file output_file)
   string(STRIP ${UNAME_ARCH} UNAME_ARCH_STRIPPED)
   add_custom_command(
     OUTPUT ${output_file}
-    COMMAND clang -O2 -target bpf -c -g -D__TARGET_ARCH_${UNAME_ARCH_STRIPPED} -I${CMAKE_SOURCE_DIR}/third_party/vmlinux/${UNAME_ARCH_STRIPPED} -I${LIBBPF_INCLUDE_DIRS}/uapi -I${LIBBPF_INCLUDE_DIRS} ${source_file} -o ${output_file}
+    COMMAND clang -Xlinker --export-dynamic -O2 -target bpf -c -g -D__TARGET_ARCH_${UNAME_ARCH_STRIPPED} -I${CMAKE_SOURCE_DIR}/third_party/vmlinux/${UNAME_ARCH_STRIPPED} -I${LIBBPF_INCLUDE_DIRS}/uapi -I${LIBBPF_INCLUDE_DIRS} ${source_file} -o ${output_file}
     DEPENDS ${source_file}
   )
   add_custom_target(${target_name}

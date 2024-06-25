@@ -3,14 +3,21 @@
  * Copyright (c) 2022, eunomia-bpf org
  * All rights reserved.
  */
+#if __APPLE__
+#include <cstdint>
+#include <pthread.h>
+#endif
+#ifdef USE_LIBBPF
 #include "bpf/bpf.h"
 #include "bpf/libbpf_common.h"
+#endif 
 #include "bpftime_helper_group.hpp"
 #include <cerrno>
-#include <sched.h>
 #ifdef ENABLE_BPFTIME_VERIFIER
 #include "bpftime-verifier.hpp"
 #endif
+
+#include "platform_utils.hpp"
 #include "spdlog/spdlog.h"
 #include <map>
 #include <stdio.h>
@@ -23,9 +30,11 @@
 #include "bpftime.hpp"
 #include "bpftime_shm.hpp"
 #include "bpftime_internal.h"
+#include "extension/userspace_xdp.h"
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <bpftime_shm_internal.hpp>
+#include <chrono>
 
 #define PATH_MAX 4096
 
@@ -80,7 +89,11 @@ uint64_t bpftime_ktime_get_coarse_ns(uint64_t, uint64_t, uint64_t, uint64_t,
 				     uint64_t)
 {
 	timespec spec;
+	#ifdef __APPLE__
+	clock_gettime(CLOCK_MONOTONIC, &spec); // or CLOCK_MONOTONIC_RAW
+	#else
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &spec);
+	#endif
 	return spec.tv_sec * (uint64_t)1000000000 + spec.tv_nsec;
 }
 
@@ -88,9 +101,19 @@ uint64_t bpftime_get_current_pid_tgid(uint64_t, uint64_t, uint64_t, uint64_t,
 				      uint64_t)
 {
 	static int tgid = getpid();
+	#if __linux__
 	static thread_local int tid = -1;
-	if (tid == -1)
+	if(tid == -1) 
+	{
 		tid = gettid();
+	}
+	#elif __APPLE__
+	static thread_local uint64_t tid = UINT64_MAX; //cannot use int because pthread_threadid_np expects only uint64_t
+	if (tid == UINT64_MAX)
+	{
+			pthread_threadid_np(NULL, &tid);
+	}
+	#endif
 	return ((uint64_t)tgid << 32) | tid;
 }
 
@@ -103,9 +126,9 @@ uint64_t bpf_get_current_uid_gid(uint64_t, uint64_t, uint64_t, uint64_t,
 
 uint64_t bpftime_ktime_get_ns(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
 {
-	timespec spec;
-	clock_gettime(CLOCK_MONOTONIC, &spec);
-	return spec.tv_sec * (uint64_t)1000000000 + spec.tv_nsec;
+	auto now = std::chrono::steady_clock::now();
+	auto ns = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
+	return ns.time_since_epoch().count();
 }
 
 uint64_t bpftime_get_current_comm(uint64_t buf, uint64_t size, uint64_t,
@@ -113,7 +136,7 @@ uint64_t bpftime_get_current_comm(uint64_t buf, uint64_t size, uint64_t,
 {
 	static std::string filename_buf;
 
-	if (filename_buf.empty()) {
+	if (unlikely(filename_buf.empty())) {
 		char strbuf[PATH_MAX];
 
 		auto len = readlink("/proc/self/exe", strbuf,
@@ -173,7 +196,11 @@ uint64_t bpf_ktime_get_coarse_ns(uint64_t, uint64_t, uint64_t, uint64_t,
 				 uint64_t)
 {
 	struct timespec ts;
+	#if __APPLE__
+	clock_gettime(CLOCK_MONOTONIC, &ts); // or CLOCK_MONOTONIC_RAW
+	#else
 	clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+	#endif
 	return (uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
 }
 
@@ -218,6 +245,7 @@ uint64_t bpf_ringbuf_submit(uint64_t data, uint64_t flags, uint64_t, uint64_t,
 	bpftime_ringbuf_submit(fd, (void *)(uintptr_t)data, false);
 	return 0;
 }
+
 uint64_t bpf_ringbuf_discard(uint64_t data, uint64_t flags, uint64_t, uint64_t,
 			     uint64_t)
 {
@@ -234,7 +262,7 @@ uint64_t bpf_ringbuf_discard(uint64_t data, uint64_t flags, uint64_t, uint64_t,
 uint64_t bpf_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 			       uint64_t data, uint64_t size)
 {
-	int32_t current_cpu = sched_getcpu();
+	int32_t current_cpu = my_sched_getcpu();
 	if (current_cpu == -1) {
 		SPDLOG_ERROR(
 			"Unable to get current cpu when running perf event output");
@@ -275,12 +303,16 @@ uint64_t bpf_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 		ret = bpftime_perf_event_output(perf_handler_fd,
 						(const void *)(uintptr_t)data,
 						(size_t)size);
-	} else if (map_ty ==
+	} 
+	#if __linux__
+	else if (map_ty ==
 		   bpftime::bpf_map_type::
 			   BPF_MAP_TYPE_KERNEL_USER_PERF_EVENT_ARRAY) {
 		ret = bpftime_shared_perf_event_output(
 			fd, (const void *)(uintptr_t)data, (size_t)size);
-	} else {
+	} 
+	#endif 
+	else {
 		SPDLOG_ERROR(
 			"Attempting to run perf_output on a non-perf array map");
 		ret = -1;
@@ -289,7 +321,6 @@ uint64_t bpf_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 	sched_setaffinity(0, sizeof(orig), &orig);
 	return (uint64_t)ret;
 }
-
 uint64_t bpftime_tail_call(uint64_t ctx, uint64_t prog_array, uint64_t index)
 {
 	int fd = prog_array >> 32;
@@ -313,6 +344,7 @@ uint64_t bpftime_tail_call(uint64_t ctx, uint64_t prog_array, uint64_t index)
 	} else {
 		memset(context, 0, sizeof(context));
 	}
+	#ifdef USE_LIBBPF
 	LIBBPF_OPTS(bpf_test_run_opts, run_opts, .ctx_in = context,
 		    // .ctx_out = context_out,
 		    .ctx_size_in = sizeof(context),
@@ -326,7 +358,9 @@ uint64_t bpftime_tail_call(uint64_t ctx, uint64_t prog_array, uint64_t index)
 	}
 	close(to_call_fd);
 	return run_opts.retval;
+	#endif
 }
+
 uint64_t bpftime_get_attach_cookie(uint64_t ctx, uint64_t, uint64_t, uint64_t,
 				   uint64_t)
 {
@@ -339,6 +373,95 @@ uint64_t bpftime_get_attach_cookie(uint64_t ctx, uint64_t, uint64_t, uint64_t,
 		return 0;
 	}
 }
+
+uint64_t bpftime_get_smp_processor_id()
+{
+	int cpu = my_sched_getcpu();
+	if (cpu == -1) {
+		SPDLOG_ERROR("sched_getcpu error");
+		return 0; // unlikely
+	}
+	return (uint64_t)cpu;
+}
+
+// From https://github.com/microsoft/ebpf-for-windows
+int64_t bpftime_csum_diff(const void *from, int from_size, const void *to,
+			  int to_size, int seed)
+{
+	int csum_diff = -EINVAL;
+
+	if ((from_size % 4 != 0) || (to_size % 4 != 0)) {
+		// size of buffers should be a multiple of 4.
+		goto Exit;
+	}
+
+	csum_diff = seed;
+	if (to != NULL) {
+		for (int i = 0; i < to_size / 2; i++) {
+			csum_diff += (uint16_t)(*((uint16_t *)to + i));
+		}
+	}
+	if (from != NULL) {
+		for (int i = 0; i < from_size / 2; i++) {
+			csum_diff += (uint16_t)(~*((uint16_t *)from + i));
+		}
+	}
+
+	// Adding 16-bit unsigned integers or their one's complement will
+	// produce a positive 32-bit integer, unless the length of the buffers
+	// is so long, that the signed 32 bit output overflows and produces a
+	// negative result.
+	if (csum_diff < 0) {
+		csum_diff = -EINVAL;
+	}
+Exit:
+	return csum_diff;
+}
+
+#define ETH_HLEN 14 /* Total octets in header.	 */
+
+long bpftime_xdp_adjust_head(struct xdp_md_userspace *xdp, int offset)
+{
+	// We don't use xdp meta data
+	uint64_t data = xdp->data + offset;
+	if (unlikely(data > xdp->data_end - ETH_HLEN) || data > xdp->buffer_end)
+		return -EINVAL;
+	if (data < xdp->buffer_start) {
+		// move the data so the buffer can place the new header
+		memmove(reinterpret_cast<void *>(xdp->buffer_start +
+						 (xdp->buffer_start - data)),
+			reinterpret_cast<void *>(xdp->data),
+			xdp->data_end - xdp->data);
+		data = xdp->buffer_start;
+	}
+	xdp->data = data;
+	return 0;
+}
+
+long bpftime_xdp_adjust_tail(struct xdp_md_userspace *xdp_md, int delta)
+{
+	// We don't use xdp meta data
+	uint64_t data = xdp_md->data_end + delta;
+	if (data < xdp_md->data || data < xdp_md->buffer_start ||
+	    data > xdp_md->buffer_end) {
+		return -EINVAL;
+	}
+	xdp_md->data_end = data;
+	return 0;
+}
+
+long bpftime_xdp_load_bytes(struct xdp_md_userspace *xdp_md, __u32 offset,
+			    void *buf, __u32 len)
+{
+	// We don't support fragmented packets
+	uint64_t data = xdp_md->data + offset;
+	if (data + len > xdp_md->data_end) {
+		return -EINVAL;
+	}
+	memcpy(buf, reinterpret_cast<void *>(data), len);
+	return 0;
+}
+
 } // extern "C"
 
 namespace bpftime
@@ -634,13 +757,36 @@ const bpftime_helper_group shm_maps_group = { {
 } };
 
 extern const bpftime_helper_group extesion_group;
-
 const bpftime_helper_group kernel_helper_group = {
 	{ { BPF_FUNC_probe_read,
 	    bpftime_helper_info{
 		    .index = BPF_FUNC_probe_read,
 		    .name = "bpf_probe_read",
 		    .fn = (void *)bpftime_probe_read,
+	    } },
+	  { BPF_FUNC_get_smp_processor_id,
+	    bpftime_helper_info{
+		    .index = BPF_FUNC_get_smp_processor_id,
+		    .name = "bpf_get_smp_processor_id",
+		    .fn = (void *)bpftime_get_smp_processor_id,
+	    } },
+	  { BPF_FUNC_csum_diff,
+	    bpftime_helper_info{
+		    .index = BPF_FUNC_csum_diff,
+		    .name = "bpf_csum_diff",
+		    .fn = (void *)bpftime_csum_diff,
+	    } },
+	  { BPF_FUNC_xdp_adjust_head,
+	    bpftime_helper_info{
+		    .index = BPF_FUNC_xdp_adjust_head,
+		    .name = "bpf_xdp_adjust_head",
+		    .fn = (void *)bpftime_xdp_adjust_head,
+	    } },
+	  { BPF_FUNC_xdp_adjust_tail,
+	    bpftime_helper_info{
+		    .index = BPF_FUNC_xdp_adjust_tail,
+		    .name = "bpf_xdp_adjust_tail",
+		    .fn = (void *)bpftime_xdp_adjust_tail,
 	    } },
 	  { BPF_FUNC_probe_read_kernel,
 	    bpftime_helper_info{
@@ -769,7 +915,6 @@ const bpftime_helper_group kernel_helper_group = {
 				 .fn = (void *)bpftime_get_attach_cookie } } }
 
 };
-
 // Utility function to get the UFUNC helper group
 const bpftime_helper_group &bpftime_helper_group::get_ufunc_helper_group()
 {
@@ -782,7 +927,6 @@ bpftime_helper_group::get_kernel_utils_helper_group()
 {
 	return kernel_helper_group;
 }
-
 const bpftime_helper_group &bpftime_helper_group::get_shm_maps_helper_group()
 {
 	return shm_maps_group;

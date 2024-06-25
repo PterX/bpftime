@@ -11,6 +11,9 @@
 #include <handler/handler_manager.hpp>
 #include <variant>
 #include <algorithm>
+#if __APPLE__
+#include "spinlock_wrapper.hpp"
+#endif
 namespace bpftime
 {
 handler_manager::handler_manager(managed_shared_memory &mem,
@@ -23,7 +26,7 @@ handler_manager::handler_manager(managed_shared_memory &mem,
 handler_manager::~handler_manager()
 {
 	for (std::size_t i = 0; i < handlers.size(); i++) {
-		SPDLOG_ERROR(
+		SPDLOG_TRACE(
 			"Handler at {} is not destroyed, but handler_manager is being destroyed",
 			i);
 	}

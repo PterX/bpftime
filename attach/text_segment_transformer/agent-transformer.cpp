@@ -1,4 +1,6 @@
 #include "spdlog/cfg/env.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+#include "spdlog/sinks/stdout_sinks.h"
 #include "spdlog/spdlog.h"
 #include <cstdlib>
 #include <dlfcn.h>
@@ -45,6 +47,8 @@ extern "C" int __libc_start_main(int (*main)(int, char **, char **), int argc,
 
 extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident)
 {
+	auto logger = spdlog::stderr_color_mt("stderr");
+	spdlog::set_default_logger(logger);
 	spdlog::cfg::load_env_levels();
 	/* We don't want to our library to be unloaded after we return. */
 	*stay_resident = TRUE;
@@ -69,8 +73,7 @@ extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident)
 	cs_arch_register_x86();
 	bpftime::setup_syscall_tracer();
 	SPDLOG_DEBUG("Loading dynamic library..");
-	auto next_handle =
-		dlmopen(LM_ID_NEWLM, agent_so, RTLD_NOW | RTLD_LOCAL);
+	auto next_handle = dlmopen(LM_ID_NEWLM, agent_so, RTLD_NOW | RTLD_LOCAL);
 	if (next_handle == nullptr) {
 		SPDLOG_ERROR("Failed to open agent: {}", dlerror());
 		exit(1);

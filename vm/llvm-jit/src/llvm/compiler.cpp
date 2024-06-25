@@ -3,7 +3,7 @@
  * Copyright (c) 2022, eunomia-bpf org
  * All rights reserved.
  */
-#include "llvm_bpf_jit.h"
+#include "llvm/IR/Argument.h"
 #include "llvm_jit_context.hpp"
 #include "ebpf_inst.h"
 #include "spdlog/spdlog.h"
@@ -27,6 +27,7 @@
 #include <endian.h>
 #include "compiler_utils.hpp"
 #include <spdlog/spdlog.h>
+#include <compat_llvm.hpp>
 using namespace llvm;
 using namespace llvm::orc;
 using namespace bpftime;
@@ -89,14 +90,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 {
 	auto context = std::make_unique<LLVMContext>();
 	auto jitModule = std::make_unique<Module>("bpf-jit", *context);
-	const struct ebpf_inst *insts = vm->insnsi;
-	if (!insts) {
-		/* Code must be loaded before we can execute */
-		return llvm::make_error<llvm::StringError>(
-			"Instructions not set yet",
-			llvm::inconvertibleErrorCode());
-	}
-	if (vm->num_insts == 0) {
+	const auto &insts = vm->instructions;
+	if (insts.empty()) {
 		return llvm::make_error<llvm::StringError>(
 			"No instructions provided",
 			llvm::inconvertibleErrorCode());
@@ -141,10 +136,10 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						 name, jitModule.get());
 		extFunc[name] = currFunc;
 	}
-	std::vector<bool> blockBegin(vm->num_insts, false);
+	std::vector<bool> blockBegin(insts.size(), false);
 	// Split the blocks
 	blockBegin[0] = true;
-	for (uint16_t i = 0; i < vm->num_insts; i++) {
+	for (uint16_t i = 0; i < insts.size(); i++) {
 		auto curr = insts[i];
 		SPDLOG_TRACE("check pc {} opcode={} ", i, (uint16_t)curr.code);
 		if (i > 0 && is_jmp(insts[i - 1])) {
@@ -160,14 +155,17 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// The main function
 	Function *bpf_func = Function::Create(
 		FunctionType::get(Type::getInt64Ty(*context),
-				  { Type::getInt8PtrTy(*context),
+				  { llvm::PointerType::getUnqual(llvm::Type::getInt8Ty(*context)),
 				    Type::getInt64Ty(*context) },
 				  false),
 		Function::ExternalLinkage, "bpf_main", jitModule.get());
-
+	
 	// Get args of uint64_t bpf_main(uint64_t, uint64_t)
-	Argument *mem = bpf_func->getArg(0);
-	Argument *mem_len = bpf_func->getArg(1);
+	llvm::Argument* mem = bpf_func->getArg(0);
+	llvm::Argument* mem_len = bpf_func->getArg(1);
+
+
+
 
 	std::vector<Value *> regs;
 	std::vector<BasicBlock *> allBlocks;
@@ -217,7 +215,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	{
 		IRBuilder<> builder(*context);
 
-		for (uint16_t i = 0; i < vm->num_insts; i++) {
+		for (uint16_t i = 0; i < insts.size(); i++) {
 			if (blockBegin[i]) {
 				// Create a block
 				auto currBlk = BasicBlock::Create(
@@ -301,7 +299,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Iterate over instructions
 	BasicBlock *currBB = instBlocks[0];
 	IRBuilder<> builder(currBB);
-	for (uint16_t pc = 0; pc < vm->num_insts; pc++) {
+	for (uint16_t pc = 0; pc < insts.size(); pc++) {
 		auto inst = insts[pc];
 		if (blockBegin[pc]) {
 			if (auto itr = instBlocks.find(pc);
@@ -612,7 +610,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						") for non-standard load operations",
 					llvm::inconvertibleErrorCode());
 			}
-			if (pc + 1 >= vm->num_insts) {
+			if (pc + 1 >= insts.size()) {
 				return llvm::make_error<llvm::StringError>(
 					"Loaded LDDW at pc=" +
 						std::to_string(pc) +

@@ -27,6 +27,51 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
+get_filename_component(CMAKE_AR_NAME "${CMAKE_AR}" NAME)
+function(bpftime_add_static_lib_component_command target)
+  if(APPLE)
+    if(CMAKE_AR_NAME STREQUAL "ar")
+      list(APPEND CMDS
+        COMMAND ${CMAKE_COMMAND} -E make_directory objs/${target}
+        COMMAND bash ${CMAKE_SOURCE_DIR}/cmake/extract_and_rename.sh $<TARGET_FILE:${target}> objs/${target}
+      )
+      set(BPFTIME_STATIC_LIB_AR_CMDS ${BPFTIME_STATIC_LIB_AR_CMDS} ${CMDS} PARENT_SCOPE)
+    else()
+      message(ERROR " CMAKE_AR is not `ar`. Only archiving with `ar` is supported.")
+    endif()
+  else()
+    list(APPEND CMDS
+      COMMAND ${CMAKE_COMMAND} -E make_directory objs/${target}
+      COMMAND bash ${CMAKE_SOURCE_DIR}/cmake/extract_and_rename.sh $<TARGET_FILE:${target}> objs/${target}
+    )
+    set(BPFTIME_STATIC_LIB_AR_CMDS ${BPFTIME_STATIC_LIB_AR_CMDS} ${CMDS} PARENT_SCOPE)
+  endif()
+  set(BPFTIME_STATIC_LIB_DEPS ${BPFTIME_STATIC_LIB_DEPS} ${target} PARENT_SCOPE)
+endfunction()
+
+function(bpftime_add_libs_component_command target_path)
+  get_filename_component(target_name ${target_path} NAME)
+  string(REGEX REPLACE "^lib" "" target_name ${target_name})
+  string(REGEX REPLACE "\.a$" "" target_name ${target_name})
+  if(APPLE)
+    if(CMAKE_AR_NAME STREQUAL "ar")
+      list(APPEND CMDS
+        COMMAND ${CMAKE_COMMAND} -E make_directory objs/${target_name}
+        COMMAND ${CMAKE_COMMAND} -E env bash ${CMAKE_SOURCE_DIR}/cmake/extract_and_rename.sh ${target_path} ${CMAKE_BINARY_DIR}/objs/${target_name}
+      )
+      set(BPFTIME_STATIC_LLVM_LIB_AR_CMDS ${BPFTIME_STATIC_LLVM_LIB_AR_CMDS} ${CMDS} PARENT_SCOPE)
+    else()
+      message(ERROR " CMAKE_AR is not `ar`. Only archiving with `ar` is supported.")
+    endif()
+  else()
+    list(APPEND CMDS
+      COMMAND ${CMAKE_COMMAND} -E make_directory objs/${target_name}
+      COMMAND ${CMAKE_COMMAND} -E env bash ${CMAKE_SOURCE_DIR}/cmake/extract_and_rename.sh ${target_path} ${CMAKE_BINARY_DIR}/objs/${target_name}
+    )
+    set(BPFTIME_STATIC_LLVM_LIB_AR_CMDS ${BPFTIME_STATIC_LLVM_LIB_AR_CMDS} ${CMDS} PARENT_SCOPE)
+  endif()
+endfunction()
+
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   message(STATUS "Enabling ubsan for Debug builds; Processor=${CMAKE_SYSTEM_PROCESSOR}")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
@@ -39,12 +84,17 @@ endif()
 
 message(STATUS "Started CMake for ${PROJECT_NAME} v${PROJECT_VERSION}...\n")
 
+# if option to build without libbpf is set
+if(${BPFTIME_BUILD_WITH_LIBBPF})
+  add_definitions(-DUSE_LIBBPF)
+endif()
+
 if(UNIX)
   add_compile_options("$<$<CONFIG:DEBUG>:-D_DEBUG>") # this will allow to use same _DEBUG macro available in both Linux as well as Windows - MSCV environment. Easy to put Debug specific code.
 endif(UNIX)
 
 set(CMAKE_C_STANDARD 99)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 #
 # Setup alternative names
@@ -64,8 +114,9 @@ if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
   message(FATAL_ERROR "In-source builds not allowed. Please make a new directory (called a build directory) and run CMake from there.\n")
 endif()
 
-include(cmake/libbpf.cmake)
-
+if(${BPFTIME_BUILD_WITH_LIBBPF})
+  include(cmake/libbpf.cmake)
+endif()
 # install frida
 include(cmake/frida.cmake)
 
@@ -90,14 +141,55 @@ add_subdirectory(third_party/argparse)
 
 # main library
 add_subdirectory(vm)
-if (BPFTIME_LLVM_JIT)
-  add_subdirectory(vm/cli)
-endif()
 
 add_subdirectory(attach)
 
 add_subdirectory(runtime)
-if (${BUILD_BPFTIME_DAEMON})
+
+
+# add to single archive if option is enabled
+if (${BPFTIME_BUILD_STATIC_LIB})
+set(UBPF_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/vm/ubpf-vm/ubpf)
+message(STATUS " Adding libraries to single static archive file")
+bpftime_add_static_lib_component_command(bpftime_vm)
+if(${BPFTIME_LLVM_JIT})
+bpftime_add_static_lib_component_command(bpftime_llvm_jit_vm)
+else()
+bpftime_add_static_lib_component_command(bpftime_ubpf_vm)
+bpftime_add_libs_component_command(${UBPF_BUILD_DIR}/lib/libubpf.a)
+endif()
+bpftime_add_libs_component_command(${FRIDA_GUM_INSTALL_DIR}/libfrida-gum.a)
+bpftime_add_static_lib_component_command(bpftime_frida_uprobe_attach_impl)
+if(${BPFTIME_BUILD_WITH_LIBBPF})
+bpftime_add_libs_component_command(${CMAKE_CURRENT_BUILD_DIR}/libbpf/libbpf/libbpf.a)
+bpftime_add_static_lib_component_command(bpftime_syscall_trace_attach_impl)
+endif()
+bpftime_add_static_lib_component_command(runtime)
+bpftime_add_static_lib_component_command(spdlog)
+add_custom_command(OUTPUT "libbpftime.a"
+    ${BPFTIME_STATIC_LIB_AR_CMDS}
+    ${BPFTIME_STATIC_LLVM_LIB_AR_CMDS}
+    COMMAND ${CMAKE_AR} -qcs libbpftime.a objs/*/*.o
+    COMMAND ${CMAKE_COMMAND} -E remove_directory objs
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS ${BPFTIME_STATIC_LIB_DEPS}
+    )
+add_custom_target(bpftime_static_target ALL DEPENDS "libbpftime.a")
+add_library(bpftime_static STATIC IMPORTED GLOBAL)
+add_dependencies(bpftime_static bpftime_static_target)
+
+set_target_properties(bpftime_static
+PROPERTIES
+IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libbpftime.a"
+)
+
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/libbpftime.a
+DESTINATION ~/.bpftime 
+)
+
+endif()
+
+if (${BUILD_BPFTIME_DAEMON} AND ${BPFTIME_BUILD_WITH_LIBBPF})
   add_subdirectory(daemon)
 endif()
 add_subdirectory(tools)
@@ -107,9 +199,17 @@ if(${BUILD_ATTACH_IMPL_EXAMPLE})
 endif()
 
 # benchmark that requires bpftime libraries
+if(${BPFTIME_BUILD_WITH_LIBBPF})
+# Currently benchmark is using libbpf
 add_subdirectory(benchmark)
+endif()
 
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
-install(TARGETS bpftime-agent bpftime_text_segment_transformer bpftime-syscall-server CONFIGURATIONS Release Debug RelWithDebInfo DESTINATION ~/.bpftime)
+set(DEST_DIR "$ENV{HOME}/.bpftime")
+if(${BPFTIME_BUILD_WITH_LIBBPF})
+    install(TARGETS bpftime-agent bpftime_text_segment_transformer bpftime-syscall-server CONFIGURATIONS Release Debug RelWithDebInfo DESTINATION ${DEST_DIR})
+else()
+    install(TARGETS bpftime-agent bpftime-syscall-server CONFIGURATIONS Release Debug RelWithDebInfo DESTINATION ${DEST_DIR})
+endif()

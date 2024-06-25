@@ -26,7 +26,7 @@ export PRINT_HELP_PYSCRIPT
 
 BROWSER := python3 -c "$$BROWSER_PYSCRIPT"
 INSTALL_LOCATION := ~/.local
-
+CXXFLAGS += -std=c++20
 JOBS := 1
 
 help:
@@ -54,6 +54,10 @@ build-iouring: ## build the package with iouring extension
 	cmake -Bbuild -DBPFTIME_ENABLE_IOURING_EXT=1 -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo
 	cmake --build build --config RelWithDebInfo  -j$(JOBS)
 
+build-wo-libbpf: ## build the package with iouring extension
+	cmake -Bbuild -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo -DBPFTIME_BUILD_WITH_LIBBPF=OFF -DBPFTIME_BUILD_KERNEL_BPF=OFF
+	cmake --build build --config RelWithDebInfo  --target install -j$(JOBS)
+
 release: ## build the release version
 	cmake -Bbuild  -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo \
 				   -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO
@@ -63,6 +67,11 @@ release-with-llvm-jit: ## build the package, with llvm-jit
 	cmake -Bbuild  -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo \
 				   -DBPFTIME_LLVM_JIT=1
 	cmake --build build --config RelWithDebInfo --target install -j$(JOBS)
+
+release-with-static-lib: ## build the release version with libbpftime archive
+	cmake -Bbuild  -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo \
+				   -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO -DBPFTIME_BUILD_STATIC_LIB=ON
+	cmake --build build --config RelWithDebInfo --target install  -j$(JOBS)
 
 build-vm: ## build only the core library
 	make -C vm build
