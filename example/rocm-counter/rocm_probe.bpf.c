@@ -34,7 +34,7 @@ static const u64 (*bpf_get_block_dim)(u64 *x, u64 *y, u64 *z) = (void *)504;
 static const u64 (*bpf_get_thread_idx)(u64 *x, u64 *y, u64 *z) = (void *)505;
 
 SEC("kprobe/_Z9vectorAddPKfS0_Pf")
-int probe__cuda()
+int probe()
 {
 	u32 pid = bpf_get_current_pid_tgid() >> 32;
 	u64 ts = bpf_get_globaltimer();
@@ -47,7 +47,8 @@ int probe__cuda()
 	u64 one = 1;
 	u64 *cnt = bpf_map_lookup_elem(&call_count, &pid);
 	if (cnt) {
-		__atomic_add_fetch(cnt, 1, __ATOMIC_SEQ_CST);
+		*cnt += 1;
+		bpf_map_update_elem(&call_count, &pid, cnt, BPF_EXIST);
 	} else {
 		bpf_map_update_elem(&call_count, &pid, &one, BPF_NOEXIST);
 	}
@@ -58,7 +59,7 @@ int probe__cuda()
 }
 
 SEC("kretprobe/_Z9vectorAddPKfS0_Pf")
-int retprobe__cuda()
+int retprobe()
 {
 	u64 x, y, z;
 	bpf_get_block_idx(&x, &y, &z);

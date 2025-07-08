@@ -5,14 +5,12 @@
 #include <ostream>
 #include <stdio.h>
 #include <stdlib.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
 #include <unistd.h>
 #include <vector>
 
 /*
-nvcc -x cu -cuda vectorAdd.cu -o vectorAdd.cpp
-python filter_hashtag.py
-g++ vectorAdd-new.cpp -Wall -L /usr/local/cuda-12.6/lib64 -lcudart -o vectorAdd -g
+hipcc vectorAdd.cpp -o vectorAdd
  */
 
 __constant__ int d_N;
@@ -31,7 +29,7 @@ int main()
 {
     // Set vector size in constant memory
     const int h_N = 1 << 20;  // 1M elements
-    cudaMemcpyToSymbol(d_N, &h_N, sizeof(h_N));
+    hipMemcpyToSymbol(HIP_SYMBOL(d_N), &h_N, sizeof(h_N), 0, hipMemcpyHostToDevice);
     
     size_t bytes = h_N * sizeof(float);
     
@@ -46,13 +44,13 @@ int main()
 
     // Allocate Device memory
     float *d_A, *d_B, *d_C;
-    cudaMalloc(&d_A, bytes);
-    cudaMalloc(&d_B, bytes);
-    cudaMalloc(&d_C, bytes);
+    hipMalloc(&d_A, bytes);
+    hipMalloc(&d_B, bytes);
+    hipMalloc(&d_C, bytes);
 
     // Copy to device
-    cudaMemcpy(d_A, h_A.data(), bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B.data(), bytes, cudaMemcpyHostToDevice);
+    hipMemcpy(d_A, h_A.data(), bytes, hipMemcpyHostToDevice);
+    hipMemcpy(d_B, h_B.data(), bytes, hipMemcpyHostToDevice);
 
     // Set up execution parameters
     int threads = 1;
@@ -61,14 +59,14 @@ int main()
     // Run the kernel in an infinite loop
     while (true) {
         // Zero output array
-        cudaMemset(d_C, 0, bytes);
+        hipMemset(d_C, 0, bytes);
         
         // Launch kernel
-        vectorAdd<<<1, 10>>>(d_A, d_B, d_C);
-        cudaDeviceSynchronize();
-        // cudaSyncho
+        hipLaunchKernelGGL(vectorAdd, dim3(1), dim3(1), 0, 0, d_A, d_B, d_C);
+        hipDeviceSynchronize();
+        
         // Copy result back to host
-        cudaMemcpy(h_C.data(), d_C, bytes, cudaMemcpyDeviceToHost);
+        hipMemcpy(h_C.data(), d_C, bytes, hipMemcpyDeviceToHost);
         
         // Print first element as a check
         std::cout << "C[0] = " << h_C[0] << " (expected 0)\n";
@@ -79,9 +77,9 @@ int main()
     }
 
     // Note: This code will never reach cleanup due to infinite loop
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    hipFree(d_A);
+    hipFree(d_B);
+    hipFree(d_C);
 
     return 0;
 }
